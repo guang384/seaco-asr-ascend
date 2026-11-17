@@ -45,8 +45,12 @@ EXPOSE 10095 10096
 # 串行启动 + 冷 JIT 热身（首启无 /root/.cache/ascend 缓存时编译可达数分钟）
 HEALTHCHECK --start-period=360s --interval=30s --timeout=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:10095/health || exit 1
+# 清空基础镜像 ENTRYPOINT（其 source CANN 环境链在无卡容器里会断——提取
+# deploy.sh 等不挂卡操作会静默失败）；CANN 环境已完整烘焙进镜像 ENV
+# （LD_LIBRARY_PATH / ASCEND_* / ATB_*），torch_npu 无需 source 即可用。
 # supervisor 是 PID 1：拉起 redis-server + gateway×E + asr-worker×N，
 # 全部配置走环境变量（清单见 proc_common.TUNABLE_PARAMS，启动时逐项打印）。
 # -u：print 日志免缓冲（docker logs 免 TTY 块缓冲）。
 # 其他工具（cat/python/pytest）：docker run --rm --entrypoint python3 $IMAGE -m pytest -q
+ENTRYPOINT []
 CMD ["python3", "-u", "supervisor.py"]
