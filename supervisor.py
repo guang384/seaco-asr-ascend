@@ -597,7 +597,7 @@ def main() -> None:
     _clean_stale_heartbeats()
     create_mailboxes()
     global _redis_proc, _task_queues
-    _redis_proc = proc_common.start_redis_server()
+    _redis_proc = ipc.start_redis_server()
     _task_queues = {"vad": mailboxes["vad_queue"],
                     "asr": mailboxes["asr_queue"],
                     "punc": mailboxes["punc_queue"]}
