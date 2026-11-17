@@ -2,17 +2,20 @@
 # -*- coding: utf-8 -*-
 """公共模块：设备探测 + 本地模型加载（compute / asr_infer / asr_batch 共用）。
 
-设备语义（fail-fast，杜绝"卡坏了伪装成健康"）：
-- 显式 --device npu / DEVICE=npu：探卡失败直接报错退出（带 remediation），
-  绝不静默降级 CPU——funasr AutoModel 在 NPU 不可用时会静默回退 CPU，
-  那正是要消掉的陷阱。
-- auto：torch_npu 可导入但无可用卡同样报错退出；仅 torch_npu 模块缺失
-  （开发机）才按 XPU → CUDA → CPU 降级。确需 CPU 请显式 --device cpu /
-  DEVICE=cpu。
+设备语义：
+- auto（默认）：NPU → XPU → CUDA → CPU 逐级**真探卡**，每级失败记 WARNING
+  后降级——降级必须看得见（funasr AutoModel 会静默回退 CPU，把卡坏伪装成
+  健康；这里用显式日志消掉该陷阱），**永不退出**。
+- 显式 DEVICE=npu：torch_npu 缺失 / 无卡 / 探卡失败 → 直接退出带 remediation
+  （明确要 NPU 却拿不到，静默降级是灾难）。
+- 显式 cpu / cuda / xpu：按指定执行，不重探。
 """
+import logging
 import os
 import subprocess
 import sys
+
+_log = logging.getLogger("asr.device")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASR_DIR = os.path.join(HERE, "speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
@@ -64,23 +67,26 @@ def pick_npu_index() -> int:
     return 0
 
 
-def _probe_npu_or_die() -> str:
-    """NPU 选卡 + 真实探卡（npu 显式 / auto 两分支共用）：失败 SystemExit
-    带 remediation。返回 "npu:idx"。"""
+def _probe_npu() -> tuple[str, str | None]:
+    """NPU 选卡 + 真实探卡（npu 显式 / auto 两分支共用）。
+    成功返回 ("npu:idx", None)；失败返回 ("", 原因描述)——由调用方决定
+    退出（显式 npu）还是降级（auto）。"""
     idx = pick_npu_index()
     try:
         _npu_probe(idx)
+        return f"npu:{idx}", None
     except Exception as exc:  # noqa: BLE001
-        sys.exit(f"[fatal] NPU 卡 {idx} 探测失败: {exc}\n{_REMEDIATION}")
-    return f"npu:{idx}"
+        return "", f"NPU 卡 {idx} 探测失败: {exc}"
 
 
 def resolve_device(prefer: str) -> str:
-    """解析推理设备（fail-fast）。返回 "npu:idx" / "xpu" / "cuda" / "cpu"。
+    """解析推理设备。返回 "npu:idx" / "xpu" / "cuda" / "cpu"。
 
-    prefer=npu：torch_npu 缺失/无卡/探卡失败 → SystemExit（带 remediation）。
-    prefer=auto：torch_npu 可导入但无可用卡 → SystemExit（拒绝静默降 CPU）；
-    模块缺失才降级 XPU → CUDA → CPU（开发机路径）。"""
+    prefer=auto（默认）：NPU → XPU → CUDA → CPU 逐级探测降级，每级失败
+    记 WARNING（降级必须看得见），**永不退出**。
+    prefer=npu（显式）：torch_npu 缺失 / 无卡 / 探卡失败 → SystemExit 带
+    remediation——明确要 NPU 却拿不到，静默降级是灾难。
+    prefer=cpu/cuda/xpu：按指定执行，不重探。"""
     if prefer == "cpu":
         return "cpu"
     import torch
@@ -91,29 +97,43 @@ def resolve_device(prefer: str) -> str:
             sys.exit(f"[fatal] --device npu 但 torch_npu 不可用: {exc}\n{_REMEDIATION}")
         if not torch.npu.is_available():
             sys.exit(f"[fatal] --device npu 但无可用 NPU 卡\n{_REMEDIATION}")
-        return _probe_npu_or_die()
+        dev, err = _probe_npu()
+        if err:
+            sys.exit(f"[fatal] --device npu 但 {err}\n{_REMEDIATION}")
+        return dev
     if prefer == "auto":
+        # ① NPU 档（真探卡，不只看注册表）
         try:
             import torch_npu  # noqa: F401
-            have_npu_mod = True
-        except Exception:  # noqa: BLE001
-            have_npu_mod = False
-        if have_npu_mod:
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("auto: torch_npu 不可导入（%s）——跳过 NPU 档", str(exc)[:120])
+        else:
             if not torch.npu.is_available():
-                sys.exit(f"[fatal] torch_npu 已加载但没有任何可用 NPU 卡——"
-                         f"拒绝静默降级 CPU\n{_REMEDIATION}")
-            return _probe_npu_or_die()
-        # 开发机（无 torch_npu）：XPU → CUDA → CPU
+                _log.warning("auto: torch_npu 可导入但无可用 NPU 卡——降级继续"
+                             "（要锁定 NPU 请显式 DEVICE=npu）")
+            else:
+                dev, err = _probe_npu()
+                if err:
+                    _log.warning("auto: %s——降级继续（要锁定 NPU 请显式 DEVICE=npu）", err)
+                else:
+                    _log.info("auto: NPU 探卡通过 → %s", dev)
+                    return dev
+        # ② XPU 档
         try:
             if torch.xpu.is_available():
+                _log.info("auto: → xpu")
                 return "xpu"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("auto: XPU 探测异常（%s）——继续", exc)
+        # ③ CUDA 档
         try:
             if torch.cuda.is_available():
+                _log.info("auto: → cuda")
                 return "cuda"
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("auto: CUDA 探测异常（%s）——继续", exc)
+        # ④ CPU 兜底
+        _log.warning("auto: NPU/XPU/CUDA 均不可用——落到 CPU（要锁卡请显式 DEVICE=npu 等）")
         return "cpu"
     # 显式 cuda/xpu：原样返回（开发便利，不做重探）
     return prefer

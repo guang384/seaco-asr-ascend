@@ -91,7 +91,8 @@ def check_deep():
         add(ERR, "torch_npu import", str(exc)[:120])
         return
     if not torch.npu.is_available():
-        add(ERR, "torch.npu.is_available()", "False —— 拒绝静默降级 CPU，查卡/驱动")
+        add(ERR, "torch.npu.is_available()", "False —— 查卡/驱动（auto 档会降级 CPU，"
+            "显式 DEVICE=npu 则直接退出）")
         return
     add(OK, "torch.npu.is_available()", f"True, {torch.npu.device_count()} card(s)")
     try:

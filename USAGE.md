@@ -21,7 +21,7 @@ docker run -d --name asr --restart=unless-stopped --init --shm-size 2g \
   --device /dev/devmm_svm --device /dev/hisi_hdc \
   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
   -v /root/.cache/ascend:/root/.cache/ascend \
-  -e DEVICE=npu -e ASR_WORKERS=8 -e GATEWAY_WORKERS=2 -e MODE=mixed \
+  -e DEVICE=npu -e ASR_WORKERS=8 -e ASR_MAX_BATCH_SIZE=16 -e MODE=mixed \
   -p 10095:10095 -p 10096:10096 iic-speech-seaco-paraformer-large-asr-ascend:arm-20261118
 ```
 
@@ -36,9 +36,9 @@ docker run -d --name asr --restart=unless-stopped --init --shm-size 2g \
 | `ASR_MAX_BATCH_SIZE` | 16 | **同桶凑批宽**：一次认领 N 个"差不多长度"（±2s 桶）的 clip 一次批前向（预热/容量自检均按此宽对齐）；升级 funasr/torch 后跑 `scripts/validate_asr_batch.py` 验证批=逐条等价（funasr 必须与镜像同版） |
 | `VAD_WORKERS` | 2 | VAD worker 进程数（CPU：整段切段 + 流式步进，独立队列） |
 | `PUNC_WORKERS` | 2 | 标点 worker 进程数（CPU，独立队列） |
-| `GATEWAY_WORKERS` | 2 | 网关进程数（SO_REUSEPORT 同端口分发；WS 会话粘在受理进程；无模型） |
+| `GATEWAY_WORKERS` | 2 | 网关进程数（**一般不调整**——吞吐靠 ASR_WORKERS；SO_REUSEPORT 同端口分发；WS 会话粘在受理进程；无模型） |
 | `MODE` | mixed | mixed=REST+WS 都服务；stream=纯流式（REST 503）；batch=纯批量（WS 拒连；VAD 照常加载——REST 切段必需） |
-| `DEVICE` | ""（auto） | 强制设备 `npu`/`cpu`/`cuda`/`xpu`；auto=NPU→XPU→CUDA→CPU。**npu 探卡失败直接退出**（拒绝静默降 CPU——funasr 会静默回退，这正是要拦的），确需 CPU 显式 `DEVICE=cpu` |
+| `DEVICE` | ""（auto） | `auto`=NPU→XPU→CUDA→CPU **逐级真探卡**，每级失败打 WARNING 后降级（永不退出——降级全在日志可见，杜绝 funasr 静默回退）；显式 `DEVICE=npu` 则探卡失败**直接退出**带 remediation（明确要 NPU 拿不到 = 灾难）；显式 cpu/cuda/xpu 按指定执行 |
 | `ASCEND_DEVICE_ID` | "" | 容器内逻辑卡号（vNPU 池化下显式指定优先） |
 | `MAX_PENDING_REQUESTS` | 8 | 每 gateway 在途 REST 请求闸门（超出 429） |
 | `MAX_INFLIGHT_TASKS` | 512 | 任务队列容量（积压满 429 queue_full） |
@@ -266,10 +266,12 @@ gzip -t ~/iic-speech-seaco-paraformer-large-asr-ascend-arm-20261118.tar.gz \
 
 ## 8. FAQ
 
-**Q: 提示 "torch_npu 已加载但没有任何可用 NPU 卡"？**
-设备解析 fail-fast（拒绝静默降 CPU 伪装健康）。查 `npu-smi info`、容器
-`--device` 挂载、`/usr/local/Ascend/driver`、`ASCEND_DEVICE_ID`；
-跑 `./deploy.sh preflight`。开发机确需 CPU：显式 `DEVICE=cpu`。
+**Q: 日志出现 "torch_npu 可导入但无可用 NPU 卡——降级继续"？**
+`auto` 档逐级降级语义：NPU 档失败打 WARNING 后落到 XPU/CUDA/CPU，服务
+继续但**跑不到卡**（RTF 明显变差）。查 `npu-smi info`、容器 `--device`
+挂载、`/usr/local/Ascend/driver`、`ASCEND_DEVICE_ID`；跑 `./deploy.sh
+preflight`。修好重启容器即可；要"拿不到 NPU 就不许起"：显式 `DEVICE=npu`
+（探卡失败直接退出）。
 
 **Q: 首个请求要几十秒甚至几分钟？**
 NPU 冷 JIT 编译。`/root/.cache/ascend` 挂载后只付一次（deploy.sh 已挂）；

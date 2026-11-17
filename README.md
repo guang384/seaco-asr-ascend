@@ -168,7 +168,8 @@ NPU 容器**必须**有 `/dev/shm ≥ 2g`（音频 SHM 块写满 64MB 默认 tmp
 - funasr **AutoModel 线程不安全** → 进程化后结构性消解（每 worker 进程独占）
 - iGPU 上 `torch.autocast` fp16 → ASR **静默输出空文本**（不报错），别开
 - funasr 在 NPU 不可用时**静默回退 CPU**（把卡坏了伪装成健康）——`asr_common.
-  resolve_device` 已 fail-fast 拦截，仅 `DEVICE=cpu` 显式才允许 CPU
+  resolve_device` 显式 `DEVICE=npu` 时 fail-fast 拦截；`auto` 档逐级降级但
+  **每级失败打 WARNING**（降级在日志里看得见，绝不无声）
 - **心跳线程绝不碰 torch.npu**（设备坏态副线程碰 NPU 会 SIGBUS 杀进程，
   kokoro 生产事故 20261109）——占用数据由主循环采样写缓存
 - NPU 首启冷 JIT 编译分钟级：`/root/.cache/ascend` 挂载后只付一次；
