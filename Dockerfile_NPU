@@ -1,0 +1,52 @@
+# ASR 服务镜像：昇腾 910B（aarch64 + CANN + torch_npu），supervisor 多进程流水线
+#（supervisor 编排 redis-server + gateway×E + vad-worker×V + punc-worker×P
+#  + asr-worker×N，见 supervisor.py）
+#
+# 基础镜像 tag 规则: torch-npu:<torch>-cann<cann>-910b-ubuntu22.04-py<py>
+# 如需换版本，改 BASE_IMAGE 即可（默认 = kokoro-tts-ascend 生产同款，
+# 910B 服务器上已验证跑通的口径）。
+#
+# 构建（WSL arm64 交叉构建，或 910B 服务器原生构建）：
+#   docker build -f Dockerfile_NPU -t iic-speech-seaco-paraformer-large-asr-ascend:arm-20261118 .
+# 运行：见 deploy.sh（必须 --shm-size 2g 起步：音频 SHM 块写满 tmpfs 即 SIGBUS）
+
+ARG BASE_IMAGE=swr.cn-south-1.myhuaweicloud.com/ascendhub/torch-npu:2.14.0-cann9.2.0-910b-ubuntu22.04-py3.12
+FROM ${BASE_IMAGE}
+
+# pip 走国内镜像（默认华为云源；海外构建可 --build-arg PIP_INDEX_URL=https://pypi.org/simple）
+ARG PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
+
+# redis-server：进程间队列服务端（unix socket、纯内存，supervisor 自拉起）
+# libsndfile1：soundfile 解 wav/flac（audio.decode_audio 第一级）
+# ffmpeg：REST 解码 mp3/m4a 等容器的兜底层（audio.decode_audio 第二级，缺失则 mp3 类 400）
+# curl：HEALTHCHECK 用
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    redis-server libsndfile1 ffmpeg curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
+
+# 代码 + 模型（模型 ~1.2GB 直接进镜像，运行免挂载）+ 测试（容器内冒烟回归用）
+# 注意：COPY 目录必须显式带目标目录名（COPY dir ./ 会把目录内容平铺散落）
+WORKDIR /app
+COPY proc_common.py protocol.py ipc.py audio.py compute.py gateway.py \
+     supervisor.py asr_common.py asr_infer.py asr_batch.py run_batch_http.py \
+     deploy.sh README.md USAGE.md ./
+COPY scripts ./scripts
+COPY tests ./tests
+COPY conftest.py pytest.ini ./
+COPY speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch ./speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/
+COPY speech_fsmn_vad_zh-cn-16k-common-pytorch ./speech_fsmn_vad_zh-cn-16k-common-pytorch/
+COPY punc_ct-transformer_zh-cn-common-vocab272727-pytorch ./punc_ct-transformer_zh-cn-common-vocab272727-pytorch/
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 10095 10096
+# 健康检查打业务端口 /health（五键卡）。start-period 覆盖模型加载 + NPU
+# 串行启动 + 冷 JIT 热身（首启无 /root/.cache/ascend 缓存时编译可达数分钟）
+HEALTHCHECK --start-period=360s --interval=30s --timeout=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:10095/health || exit 1
+# supervisor 是 PID 1：拉起 redis-server + gateway×E + asr-worker×N，
+# 全部配置走环境变量（清单见 proc_common.TUNABLE_PARAMS，启动时逐项打印）。
+# -u：print 日志免缓冲（docker logs 免 TTY 块缓冲）。
+# 其他工具（cat/python/pytest）：docker run --rm --entrypoint python3 $IMAGE -m pytest -q
+CMD ["python3", "-u", "supervisor.py"]

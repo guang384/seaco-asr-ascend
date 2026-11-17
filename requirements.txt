@@ -1,0 +1,29 @@
+# torch/torch_npu/CANN 由 ascendhub 基础镜像提供，勿在此安装
+# （版本配套关系由镜像 tag 保证：torch-npu:<torch>-cann<cann>-910b-…）
+#
+# funasr+kaldi-native-fbank = kokoro-tts-ascend 生产验证组合（torch 2.14），
+# 不依赖 torchaudio（gateway 重采样走 scipy，特征前端走 kaldi-native-fbank）。
+# 升级 funasr 前先跑容器内 pytest 与 CPU 冒烟对照。
+funasr==1.4.21
+kaldi-native-fbank
+
+# 服务
+fastapi==0.141.1
+uvicorn==0.52.3
+python-multipart==0.0.32
+websockets==17.0.1
+
+# 音频/数值（范围约束：py3.12 镜像与本地 py3.13 各自解析可用版本）
+soundfile==0.14.0
+numpy>=2.2,<3
+scipy>=1.14,<2
+librosa>=0.10.2,<1.1
+
+# IPC / 观测 / 工具
+redis>=5
+psutil==7.2.2
+requests==2.34.2
+
+# 随镜像测试（容器内 pytest 冒烟 + 离线语义回归）
+pytest
+fakeredis[lua]

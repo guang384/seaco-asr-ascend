@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asr
+  labels:
+    app: asr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: asr
+  template:
+    metadata:
+      labels:
+        app: asr
+    spec:
+      containers:
+      - name: asr
+        image: iic-speech-seaco-paraformer-large-asr-ascend:arm-20261118
+        # supervisor 是 PID 1，配置走环境变量（全量见 proc_common.TUNABLE_PARAMS）
+        env:
+        - { name: DEVICE,            value: "npu" }
+        - { name: ASR_WORKERS,       value: "8" }     # NPU 推理进程数（64G 卡口径；32G 卡改 2-4）
+        - { name: GATEWAY_WORKERS,   value: "2" }     # 网关进程数（SO_REUSEPORT 分发）
+        - { name: MODE,             value: "mixed" }  # mixed|stream|batch
+        - { name: MAX_PENDING_REQUESTS, value: "8" }
+        - { name: WAIT_TIMEOUT_S,   value: "120" }
+        ports:
+        - containerPort: 10095   # 业务（REST/WS/health/metrics）
+        - containerPort: 10096   # 监控（admin）
+        # 音频 SHM 必须给容量：默认 64MB tmpfs 写满即 SIGBUS
+        volumeMounts:
+        - { name: dshm, mountPath: /dev/shm }
+        # NPU 设备挂载（2 种方式，按集群配置选 1 种）
+
+        # 方式1: 已装 Ascend Device Plugin（推荐）
+        resources:
+          limits:
+            huawei.com/Ascend910B: 1
+
+        # 方式2: 无 device plugin，直接挂设备（暴力但能跑）
+        # volumeMounts:
+        # - name: davinci0
+        #   mountPath: /dev/davinci0
+        # - name: davinci-mgr
+        #   mountPath: /dev/davinci_manager
+        # - name: devmm-svm
+        #   mountPath: /dev/devmm_svm
+        # - name: hisi-hdc
+        #   mountPath: /dev/hisi_hdc
+        # - name: ascend-driver
+        #   mountPath: /usr/local/Ascend/driver
+        # - name: dcmi
+        #   mountPath: /usr/local/dcmi
+        # - name: npu-smi
+        #   mountPath: /usr/local/bin/npu-smi
+
+        # 三探针共用 /health（五键卡）：ready=false → 503
+        # startupProbe 15 分钟宽限：覆盖模型加载 + NPU 串行 JIT 热身
+        startupProbe:
+          httpGet: { path: /health, port: 10095 }
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          httpGet: { path: /health, port: 10095 }
+          periodSeconds: 5
+          failureThreshold: 6
+        # liveness 宽容（failureThreshold 36 ≈6 分钟）：覆盖 worker 重生瞬态，
+        # supervisor 自愈优先于容器重启
+        livenessProbe:
+          httpGet: { path: /health, port: 10095 }
+          periodSeconds: 10
+          failureThreshold: 36
+
+      volumes:
+      - name: dshm
+        emptyDir: { medium: Memory, sizeLimit: 2Gi }
+      # volumes:   # 方式2 对应
+      # - name: davinci0
+      #   hostPath: { path: /dev/davinci0 }
+      # - name: davinci-mgr
+      #   hostPath: { path: /dev/davinci_manager }
+      # - name: devmm-svm
+      #   hostPath: { path: /dev/devmm_svm }
+      # - name: hisi-hdc
+      #   hostPath: { path: /dev/hisi_hdc }
+      # - name: ascend-driver
+      #   hostPath: { path: /usr/local/Ascend/driver }
+      # - name: dcmi
+      #   hostPath: { path: /usr/local/dcmi }
+      # - name: npu-smi
+      #   hostPath: { path: /usr/local/bin/npu-smi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: asr
+spec:
+  selector:
+    app: asr
+  ports:
+  - name: business
+    port: 10095
+    targetPort: 10095
+  - name: admin
+    port: 10096
+    targetPort: 10096

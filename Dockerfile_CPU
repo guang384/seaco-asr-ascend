@@ -1,0 +1,45 @@
+# ASR 服务镜像（纯 CPU）：任意 x86_64/arm64 机器可跑
+# 用途：功能验证 / CI / 无加速卡的小规模部署（多进程流水线同样适用，
+#       DEVICE=cpu 显式指定即可——设备解析对无 torch_npu 环境自动降级）
+#
+# 构建：docker build -f Dockerfile_CPU -t asr-cpu:latest .
+# 运行：docker run -d --shm-size 2g -p 10095:10095 -p 10096:10096 \
+#          -e DEVICE=cpu -e ASR_WORKERS=2 asr-cpu:latest
+
+FROM python:3.11-slim
+
+# pip 走国内镜像（默认华为云源；海外构建可 --build-arg PIP_INDEX_URL=https://pypi.org/simple）
+ARG PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
+
+# torch CPU 轮子走官方源（国内镜像站无 pytorch cpu wheel）
+RUN pip install --no-cache-dir torch==2.14.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# redis-server：进程间队列服务端；libgomp1：torch/OpenMP 运行时
+# （arm64 的 torch wheel 不自带，缺它 _load_lib 崩）
+# ffmpeg：REST 解码 mp3/m4a 等容器的兜底层（audio.decode_audio 第二级，缺失则 mp3 类 400）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    redis-server libsndfile1 libgomp1 ffmpeg curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} -r requirements.txt
+
+# 代码 + 模型（与 NPU 版一致，开箱即用）+ 测试
+# 注意：COPY 目录必须显式带目标目录名（COPY dir ./ 会把目录内容平铺散落）
+WORKDIR /app
+COPY proc_common.py protocol.py ipc.py audio.py compute.py gateway.py \
+     supervisor.py asr_common.py asr_infer.py asr_batch.py run_batch_http.py \
+     deploy.sh README.md USAGE.md ./
+COPY scripts ./scripts
+COPY tests ./tests
+COPY conftest.py pytest.ini ./
+COPY speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch ./speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/
+COPY speech_fsmn_vad_zh-cn-16k-common-pytorch ./speech_fsmn_vad_zh-cn-16k-common-pytorch/
+COPY punc_ct-transformer_zh-cn-common-vocab272727-pytorch ./punc_ct-transformer_zh-cn-common-vocab272727-pytorch/
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 10095 10096
+HEALTHCHECK --start-period=180s --interval=30s --timeout=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:10095/health || exit 1
+# supervisor 是 PID 1：配置走环境变量（proc_common.TUNABLE_PARAMS）
+CMD ["python3", "-u", "supervisor.py"]

@@ -1,0 +1,21 @@
+# 构建上下文瘦身（与 .gitignore 不同：模型目录要进镜像，必须保留）
+.venv/
+.git/
+.zcode/
+__pycache__/
+output*.txt
+err_dump.txt
+transcripts/
+*.7z
+*.tar
+*.tar.gz
+
+# ── 涉密合规：任何音频一律不进镜像（项目示例/电话录音/压测集/模型自带示例）
+#（smoke 压测音频运行期从宿主挂载；asr_infer 需显式 --audio）
+**/*.wav
+**/*.mp3
+**/*.flac
+**/*.ogg
+**/*.pcm
+bench_audio/
+录音样本/

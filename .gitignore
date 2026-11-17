@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+
+# 虚拟环境（~6GB）
+.venv/
+
+# 模型权重（ModelScope 下载，~1.2GB，不入库）
+speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch/
+punc_ct-transformer_zh-cn-common-vocab272727-pytorch/
+speech_fsmn_vad_zh-cn-16k-common-pytorch/
+
+# 音频样本与输出（电话录音含隐私信息；AISHELL-4 源录音体积大且可联网重建）
+录音样本/
+*.wav
+*.mp3
+*.flac
+*.7z
+*.pcm
+bench_audio/_sources/
+
+# NPU 安装包 / docker 镜像导出（镜像 tar.gz 几个 GB，不入库；留磁盘供 docker load）
+*.tar
+*.tar.gz
+
+# 运行产物
+output*.txt
+transcripts/
+bench_out/
+*.log
+*.csv
+
+# 工具缓存（torchinductor 目录名含用户名）
+.pytest_cache/
+torchinductor*/
+pytest-of-*/
+
+# 内部文档与临时产物（不入库）
+.zcode/
+asr-test-health-*/
